@@ -1,17 +1,17 @@
 # AI Projects Portfolio
 
-## 🤖 AI Resume Builder with Llama-3.3-70B-Instruct
+## AI Resume Builder with Llama-3.3-70B-Instruct
 
 A production-ready web application that analyzes resumes using Meta's Llama-3.3-70B-Instruct model.
 
 ### Features
-- 🔐 Secure PostgreSQL authentication
-- 📄 PDF/DOCX resume upload
-- 🤖 AI analysis via Hugging Face
-- 📊 Real-time ATS scoring
+- Secure PostgreSQL authentication
+- PDF/DOCX resume upload
+- AI analysis via Hugging Face
+ -Real-time ATS scoring
 
 ### Tech Stack
-- Frontend: React.js
+- Frontend: streamlit, React.js
 - Backend: FastAPI (Python)
 - Database: PostgreSQL
 - AI: Llama-3.3-70B-Instruct
