@@ -1,18 +1,27 @@
 from fastapi import APIRouter, Request, HTTPException, File, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
-from app.ai_analyser import analyze_resume
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from app.ai_analyser import analyze_resume, improve_resume
 import asyncio
 import re
 import json
 import io
 from typing import Optional
 
+# PDF generation
+try:
+    import reportlab
+    PDF_REPORTLAB_SUPPORT = True
+    print("ReportLab imported successfully")
+except ImportError as e:
+    PDF_REPORTLAB_SUPPORT = False
+    print(f"Warning: reportlab not installed. PDF generation disabled. Error: {e}")
+
 # PDF processing libraries
 try:
     import PyPDF2
-    PDF_SUPPORT = True
+    PDF_PROCESSING_SUPPORT = True
 except ImportError:
-    PDF_SUPPORT = False
+    PDF_PROCESSING_SUPPORT = False
     print("Warning: PyPDF2 not installed. PDF support disabled.")
 
 try:
@@ -31,6 +40,82 @@ except ImportError:
     print("Warning: python-docx not installed. DOCX support disabled.")
 
 router = APIRouter()
+
+def generate_resume_pdf(resume_text: str, filename: str = "improved_resume.pdf") -> bytes:
+    """Generate a PDF from resume text"""
+    if not PDF_REPORTLAB_SUPPORT:
+        raise HTTPException(status_code=500, detail="PDF generation not available. Please install reportlab.")
+    
+    try:
+        # Import reportlab modules locally to ensure they're available
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
+        styles = getSampleStyleSheet()
+        
+        # Create custom styles
+        section_style = ParagraphStyle(
+            'SectionHeader',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=12,
+            spaceBefore=20,
+            fontName='Helvetica-Bold'
+        )
+        
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=11,
+            leading=14,
+            fontName='Helvetica'
+        )
+        
+        story = []
+        
+        # Split resume into lines and process
+        lines = resume_text.split('\n')
+        current_section = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if it's a section header (all caps or ends with colon)
+            if (line.isupper() and len(line) > 3) or (line.endswith(':') and len(line) > 3):
+                # Add previous section content
+                if current_section:
+                    section_text = '<br/>'.join(current_section)
+                    story.append(Paragraph(section_text, normal_style))
+                    story.append(Spacer(1, 12))
+                    current_section = []
+                
+                # Add section header
+                story.append(Paragraph(line, section_style))
+            
+            elif line.startswith('-') or line.startswith('•') or line.startswith('*'):
+                # Bullet point
+                current_section.append(f"• {line[1:].strip()}")
+            
+            else:
+                # Regular text
+                current_section.append(line)
+        
+        # Add remaining content
+        if current_section:
+            section_text = '<br/>'.join(current_section)
+            story.append(Paragraph(section_text, normal_style))
+        
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.getvalue()
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from PDF file"""
@@ -51,7 +136,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             print(f"pdfplumber extraction failed: {e}")
     
     # Fallback to PyPDF2
-    if PDF_SUPPORT:
+    if PDF_PROCESSING_SUPPORT:
         try:
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
             for page_num, page in enumerate(pdf_reader.pages):
@@ -296,7 +381,8 @@ def format_analysis_as_html(analysis_data):
 @router.post("/analyze_resume")
 async def analyze_resume_upload(
     request: Request,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    job_role: Optional[str] = None
 ):
     """Main endpoint for file upload with PDF/DOCX support"""
     try:
@@ -309,7 +395,7 @@ async def analyze_resume_upload(
         # Extract text based on file type
         text = ""
         if filename.endswith('.pdf'):
-            if not (PDF_SUPPORT or PDFPLUMBER_SUPPORT):
+            if not (PDF_PROCESSING_SUPPORT or PDFPLUMBER_SUPPORT):
                 return JSONResponse(
                     content={"success": False, "error": "PDF support not installed. Please install PyPDF2 or pdfplumber."},
                     status_code=500
@@ -337,8 +423,8 @@ async def analyze_resume_upload(
         
         print(f"Extracted {len(text)} characters of text")
         
-        # Call your existing analyze_resume function
-        result = await asyncio.to_thread(analyze_resume, text)
+        # Call your existing analyze_resume function with job_role
+        result = await asyncio.to_thread(analyze_resume, text, job_role)
         
         # Check if request accepts HTML (browser) or JSON (API)
         accept_header = request.headers.get("accept", "")
@@ -391,6 +477,67 @@ async def analyze_resume_json(request: Request):
         
         # Return JSON
         return JSONResponse(content=result)
+        
+    except Exception as e:
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=500
+        )
+
+@router.post("/improve_resume")
+async def improve_resume_endpoint(request: Request):
+    """Endpoint for resume improvement suggestions"""
+    try:
+        # Get the request body
+        body = await request.json()
+        
+        resume_text = body.get("resume_text", "")
+        job_role = body.get("job_role")
+        analysis = body.get("analysis", "")
+        format_type = body.get("format", "json")  # json or pdf
+        
+        if not resume_text:
+            raise HTTPException(status_code=400, detail="No resume text provided")
+        
+        # Call the improvement function
+        result = await asyncio.to_thread(improve_resume, resume_text, job_role, analysis)
+        
+        if format_type == "pdf":
+            # Extract improved resume content from the result
+            full_text = result.get("data", "")
+            print(f"Full text length: {len(full_text)}")
+            print(f"Format requested: {format_type}")
+            
+            # Find the IMPROVED RESUME section (use last occurrence to capture full output)
+            improved_resume_start = full_text.upper().rfind("IMPROVED RESUME")
+            print(f"IMPROVED RESUME start position: {improved_resume_start}")
+            
+            if improved_resume_start != -1:
+                improved_resume_text = full_text[improved_resume_start:]
+                # Remove the header line
+                improved_resume_text = improved_resume_text.split('\n', 1)[1] if '\n' in improved_resume_text else improved_resume_text
+            else:
+                improved_resume_text = full_text
+            
+            # If the improved resume looks significantly shorter than the original, fallback to original
+            if len(improved_resume_text.strip()) < max(300, int(len(resume_text) * 0.6)):
+                print(f"Improved resume appears too short ({len(improved_resume_text)} chars) compared to original ({len(resume_text)} chars). Using original resume.")
+                improved_resume_text = resume_text
+            
+            print(f"Final resume text length: {len(improved_resume_text)}")
+            print(f"First 300 chars: {improved_resume_text[:300]}")
+            
+            # Generate PDF
+            pdf_data = generate_resume_pdf(improved_resume_text.strip())
+            
+            return Response(
+                content=pdf_data,
+                media_type="application/pdf",
+                headers={"Content-Disposition": "attachment; filename=improved_resume.pdf"}
+            )
+        else:
+            # Return JSON
+            return JSONResponse(content=result)
         
     except Exception as e:
         return JSONResponse(
